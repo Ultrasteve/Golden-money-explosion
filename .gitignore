@@ -1,0 +1,23 @@
+# 音频、中间文件与分片缓存：可由脚本重新生成，不入库
+*.m4a
+*.mp4
+*.webm
+*.mp3
+*.flac
+*.opus
+*.wav
+*.part
+media/
+chunks/
+
+# 模型权重（SenseVoiceSmall / fsmn-vad，约 900 MB）
+models/
+
+# 本机凭据与设备标识，绝不入库
+gh_token.txt
+.git-credentials
+bili_cookies.txt
+*cookies*.txt
+.ssh/
+id_ed25519*
+known_hosts
