@@ -13,6 +13,10 @@ chunks/
 # 模型权重（SenseVoiceSmall / fsmn-vad，约 900 MB）
 models/
 
+# 个人配置（组名、UP 的 UID、本机路径）不入库，模板见 groups.example.json
+bili-asr/groups.json
+__pycache__/
+
 # 本机凭据与设备标识，绝不入库
 gh_token.txt
 .git-credentials
