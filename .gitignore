@@ -21,3 +21,6 @@ bili_cookies.txt
 .ssh/
 id_ed25519*
 known_hosts
+
+# Termux 环境搭建脚本只留在本机，不随仓库分发
+bili-asr/termux/
