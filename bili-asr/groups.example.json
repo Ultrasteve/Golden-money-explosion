@@ -1,0 +1,28 @@
+{
+  "output_root": "~/bili-daily",
+  "cookie_file": null,
+  "insecure": true,
+  "language": "auto",
+  "chunk_seconds": 60,
+  "recent_limit": 20,
+  "model_dir": null,
+  "vad_dir": null,
+  "groups": [
+    {
+      "name": "示例-盘面复盘",
+      "title_pattern": "复盘|盘面",
+      "ups": [
+        { "uid": "1883464494", "alias": "UP甲" },
+        { "uid": "2026965871", "alias": "UP乙" }
+      ]
+    },
+    {
+      "name": "示例-直播回放",
+      "title_pattern": "直播",
+      "recent_limit": 30,
+      "ups": [
+        { "uid": "27288988", "alias": "UP丙" }
+      ]
+    }
+  ]
+}
