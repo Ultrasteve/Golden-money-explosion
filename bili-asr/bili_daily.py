@@ -261,8 +261,8 @@ def main() -> None:
         "cookie_file": Path(cookie).expanduser().resolve() if cookie else None,
         "force": args.force,
         "resume_download": args.resume_download,
-        "model_dir": cfg.get("model_dir"),
-        "vad_dir": cfg.get("vad_dir"),
+        "model_dir": str(Path(cfg["model_dir"]).expanduser()) if cfg.get("model_dir") else None,
+        "vad_dir": str(Path(cfg["vad_dir"]).expanduser()) if cfg.get("vad_dir") else None,
     }
     recent_limit = int(cfg.get("recent_limit", 30))
     probe_limit = int(cfg.get("probe_limit", 12))
