@@ -4,7 +4,8 @@
   "insecure": true,
   "language": "auto",
   "chunk_seconds": 60,
-  "recent_limit": 20,
+  "recent_limit": 30,
+  "probe_limit": 12,
   "model_dir": null,
   "vad_dir": null,
   "groups": [

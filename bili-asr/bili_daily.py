@@ -44,7 +44,7 @@ def entry_bvid(entry: dict) -> str:
 
 
 def entry_time(entry: dict) -> float:
-    """投稿条目时间：优先秒级 timestamp，退回 upload_date（YYYYMMDD，按本地时区零点计）。"""
+    """扁平条目的发布时间：多数 yt-dlp 版本的 BilibiliSpaceVideoIE 不给时间，返回 0 由上层补查。"""
     for key in ("timestamp", "release_timestamp"):
         value = entry.get(key)
         if isinstance(value, (int, float)) and value > 0:
@@ -55,42 +55,60 @@ def entry_time(entry: dict) -> float:
     return 0.0
 
 
-def list_uploads(uid: str, limit: int, cookie_file: Path | None, insecure: bool) -> list[dict]:
-    """取 UP 主投稿扁平列表；条目带 title / bvid / timestamp（BilibiliSpaceVideoIE）。"""
-    try:
-        from yt_dlp import YoutubeDL
-    except ImportError as exc:
-        raise RuntimeError("缺少 yt-dlp，请先 pip install yt-dlp") from exc
-
-    opts = {
-        "extract_flat": "in_playlist",
-        "playlist_items": f"1-{max(1, limit)}",
-        "skip_download": True,
-        "quiet": True,
-        "no_warnings": True,
-        "socket_timeout": 25,
-        "retries": 2,
-        "nocheckcertificate": insecure,
-    }
+def ydl_base_opts(cookie_file: Path | None, insecure: bool) -> dict:
+    opts = {"skip_download": True, "quiet": True, "no_warnings": True,
+            "noprogress": True, "socket_timeout": 25, "retries": 2,
+            "nocheckcertificate": insecure}
     if cookie_file:
         if not cookie_file.is_file():
             raise RuntimeError(f"Cookie 文件不存在：{cookie_file}")
         opts["cookiefile"] = str(cookie_file)
+    return opts
+
+
+def _ydl(cookie_file: Path | None, insecure: bool, extra: dict | None = None):
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError as exc:
+        raise RuntimeError("缺少 yt-dlp，请先 pip install yt-dlp") from exc
+    opts = ydl_base_opts(cookie_file, insecure)
+    opts.update(extra or {})
+    return YoutubeDL(opts)
+
+
+def list_uploads(uid: str, limit: int, cookie_file: Path | None, insecure: bool) -> list[dict]:
+    """取 UP 主投稿扁平列表（按发布时间倒序）。只保证有 bvid，标题/时间可能要逐条补查。"""
     url = f"https://space.bilibili.com/{uid}/video"
-    with YoutubeDL(opts) as ydl:
+    with _ydl(cookie_file, insecure,
+              {"extract_flat": "in_playlist", "playlist_items": f"1-{max(1, limit)}"}) as ydl:
         info = ydl.extract_info(url, download=False)
     return [e for e in ((info or {}).get("entries") or []) if isinstance(e, dict)]
 
 
-def pick_today(group: dict, day: str, recent_limit: int, cookie_file: Path | None,
+def video_info(bvid: str, cookie_file: Path | None, insecure: bool) -> tuple[str, float]:
+    """单条稿件的标题与发布时间（秒）。BiliBiliIE 的 timestamp 来自 pubdate。"""
+    with _ydl(cookie_file, insecure) as ydl:
+        info = ydl.extract_info(f"https://www.bilibili.com/video/{bvid}", download=False)
+    if not isinstance(info, dict):
+        return "", 0.0
+    return str(info.get("title") or ""), entry_time(info)
+
+
+def pick_today(group: dict, day: str, recent_limit: int, probe_limit: int,
+               cookie_file: Path | None,
                insecure: bool) -> tuple[dict | None, list[str], int]:
-    """返回 (今日该组应处理的视频, 过程说明, 取数失败的 UP 数)。命中多条时取发布最早的那条。"""
+    """返回 (当日该组应处理的视频, 过程说明, 取数失败的 UP 数)。命中多条时取发布最早的那条。
+
+    扁平列表按发布时间倒序，且通常不带标题/时间，所以从最新往回逐条补查；
+    一旦查到早于当天的稿件就停（更下面的只会更早），每组每个 UP 最多补查 probe_limit 条。
+    """
     pattern = re.compile(group.get("title_pattern") or ".")
+    day_start = time.mktime(time.strptime(day, "%Y-%m-%d"))
+    day_end = day_start + 86400
     notes: list[str] = []
     found: list[dict] = []
     broken = 0
-    ups = group.get("ups") or []
-    for up in ups:
+    for up in group.get("ups") or []:
         uid = str(up.get("uid") or "").strip()
         alias = str(up.get("alias") or uid)
         if not uid.isdigit():
@@ -107,27 +125,45 @@ def pick_today(group: dict, day: str, recent_limit: int, cookie_file: Path | Non
             broken += 1
             notes.append(f"UP {alias}: 投稿列表为空（可能需 Cookie 或已被风控）")
             continue
-        dated = 0
+        probed = 0
         matched = 0
+        undated = 0
         for entry in entries:
             bvid = entry_bvid(entry)
             if not bvid:
                 continue
-            ts = entry_time(entry)
-            if ts:
-                dated += 1
             title = str(entry.get("title") or "")
-            if time.strftime("%Y-%m-%d", time.localtime(ts)) != day:
+            ts = entry_time(entry)
+            if not ts or not title:
+                if probed >= probe_limit:
+                    notes.append(f"UP {alias}: 补查达到上限 {probe_limit} 条，停止")
+                    break
+                probed += 1
+                try:
+                    probed_title, probed_ts = video_info(bvid, cookie_file, insecure)
+                except Exception as exc:
+                    notes.append(f"UP {alias}: {bvid} 补查稿件信息失败"
+                                 f"（{type(exc).__name__}: {str(exc)[:120]}）")
+                    continue
+                title = title or probed_title
+                ts = ts or probed_ts
+            if not ts:
+                undated += 1
+                continue
+            if ts < day_start:
+                break
+            if ts >= day_end:
+                notes.append(f"UP {alias}: {bvid} 发布时间晚于 {day}，忽略")
                 continue
             if not pattern.search(title):
                 notes.append(f"UP {alias}: {bvid} 标题未命中正则，忽略（{title[:40]}）")
                 continue
             matched += 1
             found.append({"bvid": bvid, "title": title, "uid": uid, "alias": alias, "ts": ts})
-        if dated == 0:
-            notes.append(f"UP {alias}: {len(entries)} 条投稿都没有发布时间，无法判定今日新视频")
-        if matched == 0 and dated:
-            notes.append(f"UP {alias}: 今日无命中投稿")
+        if undated:
+            notes.append(f"UP {alias}: {undated} 条稿件查不到发布时间，无法判定")
+        if matched == 0:
+            notes.append(f"UP {alias}: 当日无命中投稿（补查 {probed} 条）")
     if not found:
         return None, notes, broken
     return min(found, key=lambda item: item["ts"]), notes, broken
@@ -228,7 +264,8 @@ def main() -> None:
         "model_dir": cfg.get("model_dir"),
         "vad_dir": cfg.get("vad_dir"),
     }
-    recent_limit = int(cfg.get("recent_limit", 20))
+    recent_limit = int(cfg.get("recent_limit", 30))
+    probe_limit = int(cfg.get("probe_limit", 12))
     log = DailyLog(root / "logs" / f"{day}.log")
     wanted = set(args.group) if args.group else None
     failures = 0
@@ -253,6 +290,7 @@ def main() -> None:
                 continue
             picked, notes, broken = pick_today(group, day,
                                                int(group.get("recent_limit") or recent_limit),
+                                               int(group.get("probe_limit") or probe_limit),
                                                opts["cookie_file"], opts["insecure"])
             for note in notes:
                 log.write("INFO", name, note)
