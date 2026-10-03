@@ -21,6 +21,12 @@ DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 UNSAFE_RE = re.compile(r'[/\\:*?"<>|]')
 
 
+def model_path(value: object) -> str | None:
+    """模型目录可为空（留空则联网拉权重），给了值就展开 ~ 成绝对路径。"""
+    text = str(Path(str(value or "")).expanduser()).strip()
+    return text or None
+
+
 def safe_dirname(name: str) -> str:
     cleaned = UNSAFE_RE.sub("_", name).strip().rstrip(".")
     if not cleaned:
@@ -244,6 +250,8 @@ def main() -> None:
     parser.add_argument("--force", action="store_true",
                         help="今日已处理的组也重跑，并忽略片段转录缓存")
     parser.add_argument("--cookies-file", type=Path, help="覆盖配置里的 cookie_file")
+    parser.add_argument("--model-dir", type=Path, help="覆盖配置里的 model_dir（本地 SenseVoiceSmall 目录）")
+    parser.add_argument("--vad-dir", type=Path, help="覆盖配置里的 vad_dir（本地 fsmn-vad 目录）")
     parser.add_argument("--resume-download", action="store_true", help="允许 yt-dlp 断点续传")
     args = parser.parse_args()
 
@@ -260,8 +268,8 @@ def main() -> None:
         "cookie_file": Path(cookie).expanduser().resolve() if cookie else None,
         "force": args.force,
         "resume_download": args.resume_download,
-        "model_dir": str(Path(cfg["model_dir"]).expanduser()) if cfg.get("model_dir") else None,
-        "vad_dir": str(Path(cfg["vad_dir"]).expanduser()) if cfg.get("vad_dir") else None,
+        "model_dir": model_path(args.model_dir or cfg.get("model_dir")),
+        "vad_dir": model_path(args.vad_dir or cfg.get("vad_dir")),
     }
     recent_limit = int(cfg.get("recent_limit", 30))
     probe_limit = int(cfg.get("probe_limit", 12))
