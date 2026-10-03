@@ -95,9 +95,9 @@ def video_info(bvid: str, cookie_file: Path | None, insecure: bool) -> tuple[str
 
 
 def pick_today(group: dict, day: str, recent_limit: int, probe_limit: int,
-               cookie_file: Path | None,
-               insecure: bool) -> tuple[dict | None, list[str], int]:
-    """返回 (当日该组应处理的视频, 过程说明, 取数失败的 UP 数)。命中多条时取发布最早的那条。
+               cookie_file: Path | None, insecure: bool
+               ) -> tuple[dict | None, list[dict], list[str], int]:
+    """返回 (应处理的那条, 全部候选, 过程说明, 取数失败的 UP 数)。命中多条时取发布最早的那条。
 
     扁平列表按发布时间倒序，且通常不带标题/时间，所以从最新往回逐条补查；
     一旦查到早于当天的稿件就停（更下面的只会更早），每组每个 UP 最多补查 probe_limit 条。
@@ -164,9 +164,8 @@ def pick_today(group: dict, day: str, recent_limit: int, probe_limit: int,
             notes.append(f"UP {alias}: {undated} 条稿件查不到发布时间，无法判定")
         if matched == 0:
             notes.append(f"UP {alias}: 当日无命中投稿（补查 {probed} 条）")
-    if not found:
-        return None, notes, broken
-    return min(found, key=lambda item: item["ts"]), notes, broken
+    found.sort(key=lambda item: item["ts"])
+    return (found[0] if found else None), found, notes, broken
 
 
 def run_one(picked: dict, group_dir: Path, work_dir: Path, opts: dict, day: str) -> Path:
@@ -288,19 +287,24 @@ def main() -> None:
             if not args.force and log.done_today(name) and (group_dir / f"{day}.srt").is_file():
                 log.write("SKIP", name, f"今日已处理过，--force 可重跑（{group_dir / (day + '.srt')}）")
                 continue
-            picked, notes, broken = pick_today(group, day,
-                                               int(group.get("recent_limit") or recent_limit),
-                                               int(group.get("probe_limit") or probe_limit),
-                                               opts["cookie_file"], opts["insecure"])
+            picked, candidates, notes, broken = pick_today(
+                group, day,
+                int(group.get("recent_limit") or recent_limit),
+                int(group.get("probe_limit") or probe_limit),
+                opts["cookie_file"], opts["insecure"])
             for note in notes:
                 log.write("INFO", name, note)
+            for cand in candidates[1:]:
+                log.write("INFO", name, "同日还有 "
+                            f"{cand['bvid']} UP={cand['alias']} "
+                            f"发布={time.strftime('%H:%M', time.localtime(cand['ts']))}，更晚所以不处理")
             ups_total = len(group.get("ups") or [])
             if not picked and ups_total and broken == ups_total:
                 failures += 1
                 log.write("FAILED", name, f"{broken} 个 UP 的投稿列表都没取到，见上方 INFO")
                 continue
             if not picked:
-                log.write("SKIP", name, "今日无命中的新视频")
+                log.write("SKIP", name, "当日无命中的新视频")
                 continue
             published = time.strftime("%H:%M", time.localtime(picked["ts"]))
             if args.dry_run:
