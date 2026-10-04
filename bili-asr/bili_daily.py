@@ -101,16 +101,19 @@ def video_info(bvid: str, cookie_file: Path | None, insecure: bool) -> tuple[str
 
 
 def pick_today(group: dict, day: str, recent_limit: int, probe_limit: int,
-               cookie_file: Path | None, insecure: bool
+               cookie_file: Path | None, insecure: bool,
+               processed: dict[str, dict] | None = None
                ) -> tuple[dict | None, list[dict], list[str], int]:
     """返回 (应处理的那条, 全部候选, 过程说明, 取数失败的 UP 数)。命中多条时取发布最早的那条。
 
     扁平列表按发布时间倒序，且通常不带标题/时间，所以从最新往回逐条补查；
     一旦查到早于当天的稿件就停（更下面的只会更早），每组每个 UP 最多补查 probe_limit 条。
+    processed 是"处理过的 BV"台账：命中的条目直接跳过、不再补查（时间取台账里的）。
     """
     pattern = re.compile(group.get("title_pattern") or ".")
     day_start = time.mktime(time.strptime(day, "%Y-%m-%d"))
     day_end = day_start + 86400
+    processed = processed or {}
     notes: list[str] = []
     found: list[dict] = []
     broken = 0
@@ -134,9 +137,17 @@ def pick_today(group: dict, day: str, recent_limit: int, probe_limit: int,
         probed = 0
         matched = 0
         undated = 0
+        seen = 0
         for entry in entries:
             bvid = entry_bvid(entry)
             if not bvid:
+                continue
+            rec = processed.get(bvid)
+            if rec:
+                seen += 1
+                stamp = entry_time(entry) or float(rec.get("ts") or 0)
+                if stamp and stamp < day_start:
+                    break
                 continue
             title = str(entry.get("title") or "")
             ts = entry_time(entry)
@@ -168,6 +179,8 @@ def pick_today(group: dict, day: str, recent_limit: int, probe_limit: int,
             found.append({"bvid": bvid, "title": title, "uid": uid, "alias": alias, "ts": ts})
         if undated:
             notes.append(f"UP {alias}: {undated} 条稿件查不到发布时间，无法判定")
+        if seen:
+            notes.append(f"UP {alias}: {seen} 条已在处理台账中，跳过")
         if matched == 0:
             notes.append(f"UP {alias}: 当日无命中投稿（补查 {probed} 条）")
     found.sort(key=lambda item: item["ts"])
@@ -212,6 +225,26 @@ def run_one(picked: dict, group_dir: Path, work_dir: Path, opts: dict, day: str)
     return out_txt
 
 
+class Ledger:
+    """processed.json：处理成功的 BV 永久台账，跨天跨组都不再重复处理（--force 才绕过）。"""
+
+    def __init__(self, path: Path):
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.data: dict[str, dict] = {}
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                loaded = None
+            if isinstance(loaded, dict) and isinstance(loaded.get("bvids"), dict):
+                self.data = {k: v for k, v in loaded["bvids"].items() if isinstance(v, dict)}
+
+    def mark(self, bvid: str, record: dict) -> None:
+        self.data[bvid] = record
+        atomic_text(self.path, json.dumps({"bvids": self.data}, ensure_ascii=False, indent=2))
+
+
 class DailyLog:
     """logs/<日期>.log 既是运行日志，也是"今日该组是否已处理"的依据。"""
 
@@ -248,7 +281,7 @@ def main() -> None:
     parser.add_argument("--date", help="处理指定日期 YYYY-MM-DD（默认今天）")
     parser.add_argument("--dry-run", action="store_true", help="只选视频，不下载不转写")
     parser.add_argument("--force", action="store_true",
-                        help="今日已处理的组也重跑，并忽略片段转录缓存")
+                        help="破除全部去重：今日已处理的组重跑、处理台账里的 BV 重新入选，并忽略片段转录缓存")
     parser.add_argument("--cookies-file", type=Path, help="覆盖配置里的 cookie_file")
     parser.add_argument("--model-dir", type=Path, help="覆盖配置里的 model_dir（本地 SenseVoiceSmall 目录）")
     parser.add_argument("--vad-dir", type=Path, help="覆盖配置里的 vad_dir（本地 fsmn-vad 目录）")
@@ -274,6 +307,7 @@ def main() -> None:
     recent_limit = int(cfg.get("recent_limit", 30))
     probe_limit = int(cfg.get("probe_limit", 12))
     log = DailyLog(root / "logs" / f"{day}.log")
+    ledger = Ledger(root / "processed.json")
     wanted = set(args.group) if args.group else None
     failures = 0
     try:
@@ -299,7 +333,8 @@ def main() -> None:
                 group, day,
                 int(group.get("recent_limit") or recent_limit),
                 int(group.get("probe_limit") or probe_limit),
-                opts["cookie_file"], opts["insecure"])
+                opts["cookie_file"], opts["insecure"],
+                None if args.force else ledger.data)
             for note in notes:
                 log.write("INFO", name, note)
             for cand in candidates[1:]:
@@ -326,6 +361,11 @@ def main() -> None:
                 log.write("FAILED", name, f"{picked['bvid']} {type(exc).__name__}: {str(exc)[:300]}")
                 continue
             log.write("OK", name, f"{picked['bvid']} UP={picked['alias']} 发布={published} → {out_txt}")
+            ledger.mark(picked["bvid"], {
+                "group": name, "date": day, "bvid": picked["bvid"],
+                "title": picked["title"], "uid": picked["uid"], "alias": picked["alias"],
+                "ts": picked["ts"],
+                "done_at": time.strftime("%Y-%m-%d %H:%M:%S")})
     finally:
         log.close()
     if failures:

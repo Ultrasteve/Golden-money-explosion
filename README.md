@@ -18,7 +18,7 @@ python bili_daily.py                   # 正式跑
 
 | 字段 | 作用 |
 | --- | --- |
-| `output_root` | 结果根目录，展开 `~`；产物在 `<output_root>/results/<组名>/<日期>.{txt,srt,metadata.json}`，日志在 `<output_root>/logs/<日期>.log` |
+| `output_root` | 结果根目录，展开 `~`；产物在 `<output_root>/results/<组名>/<日期>.{txt,srt,metadata.json}`，日志在 `<output_root>/logs/<日期>.log`，`processed.json`（BV 处理台账）和 `published.json`（发布台账）在同级 |
 | `groups[].name` | 视频组名，直接用作目录名（`/ \ : * ? " < > \|` 换成 `_`） |
 | `groups[].title_pattern` | Python 正则，标题命中才算这个组的新视频；不写则全部算 |
 | `groups[].ups[]` | 组内 UP，`uid` 是 `space.bilibili.com/<uid>` 里的数字，`alias` 只用于日志 |
@@ -30,19 +30,43 @@ python bili_daily.py                   # 正式跑
 选片规则：对组内每个 UP 拉投稿列表（按发布时间倒序）→ 从最新往回逐条补查标题与发布时间，查到早于当天的稿件即停 → 保留**发布日期等于当天**且标题命中正则的条目 → 所有候选里取**发布时间最早**的一条处理；没有任何 UP 命中则跳过该组。
 之所以要逐条补查：当前 yt-dlp 的空间投稿扁平列表只给 BV 号，不给标题和发布时间。当天投稿一般排在最前面，所以实际每人只需补查 1～3 条。
 
-常用参数：`--group 组名`（只跑某组，可重复）、`--date 2026-10-01`（补跑某天）、`--force`（当天已处理也重跑，并忽略转录片段缓存）、`--dry-run`、`--cookies-file`、`--output`、`--config`。
+常用参数：`--group 组名`（只跑某组，可重复）、`--date 2026-10-01`（补跑某天）、`--force`（破除所有去重：当天已处理也重跑、台账里的 BV 重新入选，并忽略转录片段缓存）、`--dry-run`、`--cookies-file`、`--output`、`--config`。
 
-同一天重复运行是安全的：日志里已有该组当天的 `OK` 记录且结果文件存在时，该组会被 `SKIP`；每个组只处理一条视频，产物按 `<组名>/<日期>` 命名，天然幂等。单个 UP 取列表失败只写 INFO；一个组里所有 UP 都失败会记 `FAILED` 并使退出码为 1，其余组继续。
+去重有两层，同日重复运行都是安全的：
+
+1. **组 × 日期**：日志里已有该组当天的 `OK` 记录且结果文件存在时，该组会被 `SKIP`（今天处理过就不再处理）。
+2. **BV 台账**：处理成功的 BV 永久记入 `<output_root>/processed.json`，跨天跨组都不再重复处理——哪怕换一个组、换一个日期遇到同一个 BV 也会跳过（这个视频处理过就永不重跑）。台账里的条目连补查都省掉，不额外耗 B 站请求。
+
+单个 UP 取列表失败只写 INFO；一个组里所有 UP 都失败会记 `FAILED` 并使退出码为 1，其余组继续。
 
 日志一行一条：`时间 | OK/SKIP/FAILED/DRY/INFO | 组名 | 说明`。
 
 离线回归测试（不联网、不需要模型）：`python test_daily.py`，全部通过输出 `RESULT: ALL PASS`。
 
-定时任务示例（Termux + `termux-cron`，每天 12:30）：
+定时任务示例（Termux + `termux-cron`，每天 12:30 转写、13:00 推送）：
 
 ```cron
 30 12 * * * cd ~/Golden-money-explosion/bili-asr && /data/data/com.termux/files/usr/bin/python bili_daily.py >> ~/bili-daily/logs/cron.log 2>&1
+0  13 * * * cd ~/Golden-money-explosion/bili-asr && /data/data/com.termux/files/usr/bin/python bili_publish.py >> ~/bili-daily/logs/publish.log 2>&1
 ```
+
+## 发布到 GitHub（只走 api.github.com，单向上传，不做同步）
+
+手机目录只是工程目录，不是仓库克隆；`github.com` 在手机上不通，所以不用 git，
+`bili_publish.py` 直接调 GitHub 的 Git Data API（ref → blob → tree → commit → 推进 ref），
+只把 `<output_root>/results/<组名>/<日期>.txt` 推到仓库的 `daily/<组名>/<日期>.txt`，
+srt/metadata/日志/媒体一概不推。`<output_root>/published.json` 记每个文件的 sha256，
+内容没变不再重复推；若分支被别处推进导致非快进，自动重取 ref 重试（不强推）。
+
+```bash
+python bili_publish.py --dry-run        # 只列将要推的文件
+python bili_publish.py                  # 正式推送
+```
+
+配置：`--repo owner/name`（或 groups.json 里的 `publish_repo`）、`--branch`（默认 main）、
+`--prefix`（默认 `daily`）、`--token-file`（默认 `~/gh_token.txt`，第一行非空内容即 PAT，
+需要对该仓库有 contents 写权限）、`--group` 过滤。默认不校验 TLS 证书（Termux 常缺系统 CA），
+要校验加 `--secure`。
 
 ## 单条 BV 转写
 

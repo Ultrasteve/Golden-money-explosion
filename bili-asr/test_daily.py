@@ -214,5 +214,112 @@ check("--date 可补跑历史日期并单独成文件",
       CALLS == [YDAY] and backfill.is_file() and YDAY in backfill.read_text(encoding="utf-8"),
       (CALLS, listing(group_dir)))
 
+LEDGER_FILE = ROOT / "processed.json"
+led = json.loads(LEDGER_FILE.read_text(encoding="utf-8"))["bvids"]
+check("处理成功的 BV 永久写入 processed.json 台账",
+      set(led) == {EARLY, FLATMETA, YDAY}, set(led))
+check("台账记录组名/日期/标题", led[EARLY].get("group") == CFG["groups"][0]["name"]
+      and led[EARLY].get("date") == DAY and "复盘" in led[EARLY].get("title", ""), led[EARLY])
+
+PROBED.clear()
+picked_l, _, notes_l, _ = bili_daily.pick_today(CFG["groups"][0], DAY, 5, 12, None, True, led)
+check("台账命中的 BV 永不重复处理：EARLY 不再入选",
+      picked_l and picked_l["bvid"] == LATE, (picked_l, notes_l))
+check("台账命中且不补查", EARLY not in PROBED and YDAY not in PROBED, PROBED)
+check("台账跳过会记入 INFO", "已在处理台账中" in "\n".join(notes_l), notes_l)
+
+import bili_publish  # noqa: E402
+
+TOKEN = TMP / "gh_token.txt"
+TOKEN.write_text("gph_fake_token_for_test\n", encoding="utf-8")
+PUBLISH_CALLS: list[tuple[str, str]] = []
+
+
+def fake_api_factory(conflict_once: bool = False):
+    state = {"conflict": conflict_once, "blobs": 0, "commits": 0}
+
+    def fake_api(method, path, token, payload=None, insecure=True):
+        assert token == "gph_fake_token_for_test"
+        PUBLISH_CALLS.append((method, path))
+        if method == "GET" and "/git/ref/heads/" in path:
+            return 200, {"object": {"sha": "BASE%d" % state["commits"]}}
+        if path.endswith("/git/blobs"):
+            assert payload["encoding"] == "base64"
+            import base64 as _b64
+            assert _b64.b64decode(payload["content"]).decode("utf-8").startswith("视频组：")
+            state["blobs"] += 1
+            return 201, {"sha": "BLOB%03d" % state["blobs"]}
+        if path.endswith("/git/trees"):
+            assert payload["base_tree"] == "BASE%d" % state["commits"]
+            assert all(e["mode"] == "100644" and e["type"] == "blob" for e in payload["tree"])
+            return 201, {"sha": "TREE"}
+        if path.endswith("/git/commits"):
+            assert payload["parents"] == ["BASE%d" % state["commits"]]
+            state["commits"] += 1
+            return 201, {"sha": "COMMIT%d" % state["commits"]}
+        if method == "PATCH" and "/git/refs/heads/" in path:
+            assert payload["force"] is False, "不允许强推覆盖别人的提交"
+            if state["conflict"]:
+                state["conflict"] = False
+                return 422, {"message": "non-fast-forward"}
+            return 200, {"object": {"sha": payload["sha"]}}
+        raise AssertionError(f"计划外的 API 调用：{method} {path}")
+    return fake_api
+
+
+def publish(extra: list[str] | None = None) -> int:
+    sys.argv = ["bili_publish.py", "--config", str(TMP / "groups.json"),
+                "--repo", "Ultrasteve/SomeRepo", "--token-file", str(TOKEN)] + (extra or [])
+    try:
+        bili_publish.main()
+        return 0
+    except SystemExit as exc:
+        return exc.code or 0
+
+
+PUB_FILE = ROOT / "published.json"
+PUBLISH_CALLS.clear()
+bili_publish.api = fake_api_factory()
+code = publish(["--dry-run"])
+dest = "daily/" + group_dir.name + "/2026-10-02.txt"
+check("publish --dry-run 只列计划、不调 API、不写台账",
+      code == 0 and PUBLISH_CALLS == [] and not PUB_FILE.is_file(), (code, PUBLISH_CALLS))
+
+code = publish()
+check("publish 走 ref/blob/tree/commit/ref 五步 Git Data API",
+      code == 0 and [m + " " + p for m, p in PUBLISH_CALLS] == [
+          "GET /repos/Ultrasteve/SomeRepo/git/ref/heads/main",
+          "POST /repos/Ultrasteve/SomeRepo/git/blobs",
+          "POST /repos/Ultrasteve/SomeRepo/git/blobs",
+          "POST /repos/Ultrasteve/SomeRepo/git/blobs",
+          "POST /repos/Ultrasteve/SomeRepo/git/trees",
+          "POST /repos/Ultrasteve/SomeRepo/git/commits",
+          "PATCH /repos/Ultrasteve/SomeRepo/git/refs/heads/main",
+      ], [m + " " + p for m, p in PUBLISH_CALLS])
+pub = json.loads(PUB_FILE.read_text(encoding="utf-8"))["files"]
+check("只推 txt 到 daily/<组名>/<日期>.txt",
+      all(p.startswith("daily/") and p.endswith(".txt") for p in pub)
+      and dest in pub and len(pub) == 3, list(pub))
+
+PUBLISH_CALLS.clear()
+code = publish()
+check("内容未变的文件靠 published.json 去重，不再调 API",
+      code == 0 and PUBLISH_CALLS == [], PUBLISH_CALLS)
+
+(group_dir / "2026-10-02.txt").write_text("视频组：改了内容\n\n新正文", encoding="utf-8")
+PUBLISH_CALLS.clear()
+code = publish()
+check("内容变了会重推该文件",
+      code == 0 and sum(p.endswith("/git/blobs") for _, p in PUBLISH_CALLS) == 1,
+      (code, PUBLISH_CALLS))
+
+(group_dir / "2026-10-01.txt").write_text("视频组：改了历史日期\n\n新正文", encoding="utf-8")
+PUBLISH_CALLS.clear()
+bili_publish.api = fake_api_factory(conflict_once=True)
+code = publish()
+check("非快进冲突自动重取 ref 重走五步并成功",
+      code == 0 and [m for m, _ in PUBLISH_CALLS] ==
+      ["GET", "POST", "POST", "POST", "PATCH"] * 2, (code, PUBLISH_CALLS))
+
 print("RESULT:", "ALL PASS" if not FAILED_CHECKS else f"FAILED: {FAILED_CHECKS}")
 sys.exit(1 if FAILED_CHECKS else 0)
