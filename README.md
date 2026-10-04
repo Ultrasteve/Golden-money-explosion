@@ -18,7 +18,7 @@ python bili_daily.py                   # 正式跑
 
 | 字段 | 作用 |
 | --- | --- |
-| `output_root` | 结果根目录，展开 `~`；产物在 `<output_root>/results/<组名>/<日期>.{txt,srt,metadata.json}`，日志在 `<output_root>/logs/<日期>.log`，`processed.json`（BV 处理台账）和 `published.json`（发布台账）在同级 |
+| `output_root` | 结果根目录，展开 `~`；产物**只保留** `<output_root>/results/<组名>/<日期>.txt`，日志在 `<output_root>/logs/<日期>.log`，`processed.json`（BV 处理台账）和 `published.json`（发布台账）在同级 |
 | `groups[].name` | 视频组名，直接用作目录名（`/ \ : * ? " < > \|` 换成 `_`） |
 | `groups[].title_pattern` | Python 正则，标题命中才算这个组的新视频；不写则全部算 |
 | `groups[].ups[]` | 组内 UP，`uid` 是 `space.bilibili.com/<uid>` 里的数字，`alias` 只用于日志 |
@@ -103,5 +103,5 @@ git clone https://www.modelscope.cn/fsmn-vad.git
 
 - 每组每天只处理一条视频：当天第二条命中、且发布时间晚于选中那条的稿件不会转写。
 - 逐条补查按"倒序遇到更早稿件即停"，若某个 UP 当天稿件数超过 `probe_limit`，会漏掉更早的那些并在日志 INFO 里说明。
-- 结果目录以组名为单位，不含 BV 号；BV 号、UP、发布时间记录在 `<日期>.metadata.json` 里。
-- 转录片段缓存在 `<output_root>/work/<组名>/<日期>/chunks/`，用于断点续跑；想彻底重跑当天某组，加 `--force` 或删掉对应 work 目录。
+- 结果目录以组名为单位，不含 BV 号；BV 号、UP、发布时间和标题写在 txt 头部，并记录在 `processed.json` 台账里。
+- 中间文件（下载音频、16k wav、分块转录缓存）放在 `<output_root>/work/<组名>/<日期>/`，**跑成功后自动整个删除**；只有失败或中断时才保留，用于断点续跑（重跑同一命令即可接着算）。srt/metadata 已不再产出，重跑某天需要重新下载转写。

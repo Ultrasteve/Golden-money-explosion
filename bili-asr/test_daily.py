@@ -107,10 +107,11 @@ def fake_download_audio(bvid, media_dir, insecure, browser, cookies_file, resume
 
 bili_daily.download_audio = fake_download_audio
 bili_daily.convert_wav = lambda source, wav_file: wav_file.write_bytes(b"w")
-bili_daily.transcribe_wav = lambda wav_file, chunks, sec, lang, force, m, v: [
+GOOD_TRANSCRIBE = lambda wav_file, chunks, sec, lang, force, m, v: [
     {"text": "转写正文", "entries": [{"start_ms": 0, "end_ms": 5000, "text": "转写正文"}],
      "timing_method": "vad_or_sentence_boundaries", "start_frame": 0, "frames": 80000,
      "language": lang}]
+bili_daily.transcribe_wav = GOOD_TRANSCRIBE
 
 TMP = Path(tempfile.mkdtemp(prefix="bili-daily-test-"))
 CFG = {
@@ -166,14 +167,16 @@ body = txt.read_text(encoding="utf-8") if txt.is_file() else ""
 
 check("有组全失败时退出码为 1", code == 1, code)
 check("组名做目录且非法字符换成下划线", group_dir.is_dir(), listing(RESULTS))
-check("输出文件按日期命名", srt.is_file() and txt.is_file(), listing(group_dir))
+check("输出只保留按日期命名的 txt",
+      txt.is_file() and not srt.exists() and not (group_dir / f"{DAY}.metadata.json").exists(),
+      listing(group_dir))
+check("选中组成功当天 work 中间文件自动清理",
+      not (ROOT / "work" / "A组_异常_字符" / DAY).exists(),
+      listing(ROOT / "work") if (ROOT / "work").is_dir() else "<work 已空>")
 check("选中的是当日最早命中的一条（UP乙 06:00）", EARLY in body and "UP乙" in body, body)
 check("同日较晚命中的 UP甲 未被选", LATE not in body)
 check("标题未命中正则的被忽略", TRAILER not in body and "未命中正则" in log_text())
 check("前一天的投稿不算今日", YDAY not in body)
-check("SRT 含时间轴", srt.is_file() and "-->" in srt.read_text(encoding="utf-8"))
-check("metadata 记录组名/日期/BV/UP",
-      json.loads((group_dir / f"{DAY}.metadata.json").read_text(encoding="utf-8"))["bvid"] == EARLY)
 check("扁平列表只有 BV 号时靠补查拿到标题与时间", LATE in PROBED and EARLY in PROBED, PROBED)
 check("补查遇到更早稿件即停（UP乙 一条就够）", PROBED.count(EARLY) == 1, PROBED)
 check("扁平条目自带标题+时间时不再补查",
@@ -227,6 +230,23 @@ check("台账命中的 BV 永不重复处理：EARLY 不再入选",
       picked_l and picked_l["bvid"] == LATE, (picked_l, notes_l))
 check("台账命中且不补查", EARLY not in PROBED and YDAY not in PROBED, PROBED)
 check("台账跳过会记入 INFO", "已在处理台账中" in "\n".join(notes_l), notes_l)
+
+WORK_A = ROOT / "work" / "A组_异常_字符" / DAY
+
+def broken_transcribe(*a, **k):
+    raise RuntimeError("模型加载失败")
+
+bili_daily.transcribe_wav = broken_transcribe
+code = run(["--force", "--group", CFG["groups"][0]["name"]])
+check("转写失败：该组记 FAILED 且退出码 1",
+      code == 1 and "| FAILED | " + CFG["groups"][0]["name"] + " |" in log_text(), code)
+check("失败时保留断点：work 的媒体与分块目录还在",
+      WORK_A.is_dir() and (WORK_A / "media").is_dir(), listing(WORK_A) if WORK_A.is_dir() else "<无>")
+bili_daily.transcribe_wav = GOOD_TRANSCRIBE
+run(["--force", "--group", CFG["groups"][0]["name"]])
+check("修复后重跑成功并清空 work 中间文件",
+      not WORK_A.exists() and "| OK | " + CFG["groups"][0]["name"] + " |" in log_text(),
+      WORK_A.exists())
 
 import bili_publish  # noqa: E402
 

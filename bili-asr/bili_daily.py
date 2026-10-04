@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Termux/Python 3: 视频组日调度 —— 每组每天只取"最快发布"的那个 UP 的新视频，转写后按组名归档。
 
+产物只保留 <组名>/<日期>.txt；成功后自动清掉 work/ 的下载音频与分块缓存，srt/metadata 不再写盘。
 配置见 groups.example.json。依赖 yt-dlp（取 UP 主投稿扁平列表）与 bili_asr.py 的下载/转写流程。
 只处理你有权下载的视频。
 """
@@ -11,10 +12,11 @@ import argparse
 import json
 from pathlib import Path
 import re
+import shutil
 import sys
 import time
 
-from bili_asr import (BVID_RE, atomic_text, convert_wav, download_audio, format_srt,
+from bili_asr import (BVID_RE, atomic_text, convert_wav, download_audio,
                       timestamp, transcribe_wav)
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
@@ -188,14 +190,17 @@ def pick_today(group: dict, day: str, recent_limit: int, probe_limit: int,
 
 
 def run_one(picked: dict, group_dir: Path, work_dir: Path, opts: dict, day: str) -> Path:
-    """复用 bili_asr 的单视频流程，产物按 <日期> 落在组目录下。"""
+    """复用 bili_asr 的单视频流程，产物按 <日期> 落在组目录下。
+
+    成功后只保留 <日期>.txt：srt/metadata 不再写盘，work/ 下的下载音频与
+    分块缓存整个删掉；中途失败则原样保留，供断点续跑。
+    """
     bvid = picked["bvid"]
     media = work_dir / "media"
     chunks = work_dir / "chunks"
     for directory in (media, chunks, group_dir):
         directory.mkdir(parents=True, exist_ok=True)
     out_txt = group_dir / f"{day}.txt"
-    out_srt = group_dir / f"{day}.srt"
 
     audio, title = download_audio(bvid, media, opts["insecure"], None,
                                  opts["cookie_file"], opts["resume_download"])
@@ -208,20 +213,13 @@ def run_one(picked: dict, group_dir: Path, work_dir: Path, opts: dict, day: str)
               f"UP：{picked['alias']}（UID {picked['uid']}）",
               f"BV：{bvid}", f"来源：https://www.bilibili.com/video/{bvid}",
               f"标题：{final_title}",
-              "时间索引为分块起点；SRT 优先使用模型返回的语音段边界，不保证逐词精度。"]
+              "时间索引为分块起点，优先使用模型返回的语音段边界，不保证逐词精度。"]
     body = [f"[{timestamp(d['start_frame'] * 1000 // 16000).split(',')[0]}] {d['text']}"
             for d in data if d["text"]]
     atomic_text(out_txt, "\n".join(header + [""] + body) + "\n")
-    atomic_text(out_srt, format_srt(data))
-    atomic_text(group_dir / f"{day}.metadata.json",
-                json.dumps({"group": group_dir.name, "date": day, "bvid": bvid,
-                            "up_alias": picked["alias"], "up_uid": picked["uid"],
-                            "published_at": time.strftime("%Y-%m-%d %H:%M:%S",
-                                                           time.localtime(picked["ts"])),
-                            "title": final_title, "audio": str(audio),
-                            "model": "iic/SenseVoiceSmall", "language": opts["language"],
-                            "timing_methods": [d["timing_method"] for d in data]},
-                           ensure_ascii=False, indent=2))
+    shutil.rmtree(work_dir, ignore_errors=True)
+    for stale in (group_dir / f"{day}.srt", group_dir / f"{day}.metadata.json"):
+        stale.unlink(missing_ok=True)
     return out_txt
 
 
@@ -326,8 +324,8 @@ def main() -> None:
                 log.write("FAILED", name, str(exc))
                 continue
             group_dir = root / "results" / dir_name
-            if not args.force and log.done_today(name) and (group_dir / f"{day}.srt").is_file():
-                log.write("SKIP", name, f"今日已处理过，--force 可重跑（{group_dir / (day + '.srt')}）")
+            if not args.force and log.done_today(name) and (group_dir / f"{day}.txt").is_file():
+                log.write("SKIP", name, f"今日已处理过，--force 可重跑（{group_dir / (day + '.txt')}）")
                 continue
             picked, candidates, notes, broken = pick_today(
                 group, day,
